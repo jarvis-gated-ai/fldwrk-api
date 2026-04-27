@@ -1,0 +1,30 @@
+{
+  "name": "@tradepilot/api",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "type-check": "tsc --noEmit",
+    "lint": "eslint src --ext .ts"
+  },
+  "dependencies": {
+    "@hono/node-server": "^1.10.1",
+    "@supabase/supabase-js": "^2.43.1",
+    "hono": "^4.4.2",
+    "openai": "^4.52.7",
+    "stripe": "^16.2.0",
+    "zod": "^3.23.8",
+    "@hono/zod-validator": "^0.2.2",
+    "dotenv": "^16.4.5",
+    "multer": "^1.4.5-lts.1",
+    "form-data": "^4.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.10",
+    "@types/multer": "^1.4.11",
+    "typescript": "^5.5.3",
+    "tsx": "^4.16.2"
+  }
+}
