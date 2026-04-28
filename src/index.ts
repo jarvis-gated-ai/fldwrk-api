@@ -19,7 +19,7 @@ app.use('*', prettyJSON());
 app.use(
   '*',
   cors({
-    origin: ['http://localhost:3000', 'http://localhost:8081', 'exp://localhost:8081'],
+    origin: (origin) => origin ?? '*', // allow Expo Go tunnel + any client
     allowMethods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     allowHeaders: ['Content-Type', 'Authorization'],
     credentials: true,
