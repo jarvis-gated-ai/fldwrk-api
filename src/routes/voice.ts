@@ -33,25 +33,24 @@ voiceRouter.post('/transcribe', async (c) => {
     );
   }
 
-  const jobId = formData.get('job_id') as string | null;
+  const jobId = (formData.get('job_id') as string | null) || null;
   const audioFile = formData.get('audio') as File | null;
 
-  if (!jobId) {
-    return c.json({ error: { message: 'job_id is required', code: 'VALIDATION_ERROR' } }, 400);
-  }
   if (!audioFile) {
     return c.json({ error: { message: 'audio file is required', code: 'VALIDATION_ERROR' } }, 400);
   }
 
-  // Verify the job belongs to this user's company (RLS will enforce, but explicit check gives better error)
-  const { data: job, error: jobError } = await supabase
-    .from('jobs')
-    .select('id')
-    .eq('id', jobId)
-    .single();
+  // Only validate job ownership if a job_id was provided
+  if (jobId) {
+    const { data: job, error: jobError } = await supabase
+      .from('jobs')
+      .select('id')
+      .eq('id', jobId)
+      .single();
 
-  if (jobError || !job) {
-    return c.json({ error: { message: 'Job not found or access denied', code: 'NOT_FOUND' } }, 404);
+    if (jobError || !job) {
+      return c.json({ error: { message: 'Job not found or access denied', code: 'NOT_FOUND' } }, 404);
+    }
   }
 
   // ── 1. Upload audio to Supabase Storage ──────
@@ -59,7 +58,7 @@ voiceRouter.post('/transcribe', async (c) => {
   const audioBuffer = await audioFile.arrayBuffer();
   const audioBytes = new Uint8Array(audioBuffer);
   const fileExt = audioFile.name.split('.').pop() ?? 'mp4';
-  const storagePath = `${userId}/${jobId}/${Date.now()}.${fileExt}`;
+  const storagePath = `${userId}/${jobId ?? 'unlinked'}/${Date.now()}.${fileExt}`;
 
   const { data: uploadData, error: uploadError } = await supabaseAdmin.storage
     .from(STORAGE_BUCKET)
@@ -142,7 +141,7 @@ Be direct and professional.`,
   const { data: voiceLog, error: dbError } = await supabaseAdmin
     .from('voice_logs')
     .insert({
-      job_id: jobId,
+      job_id: jobId ?? null,
       user_id: userId,
       audio_url: audioUrl,
       transcript,
