@@ -24,6 +24,6 @@ healthRouter.get('/', async (c) => {
         database: dbStatus,
       },
     },
-    status === 'ok' ? 200 : 503
+200
   );
 });

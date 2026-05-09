@@ -2,7 +2,7 @@ import { Hono } from 'hono';
 import { zValidator } from '@hono/zod-validator';
 import { z } from 'zod';
 import { authMiddleware, AuthVariables } from '../middleware/auth';
-import { createUserClient } from '../lib/supabase';
+import { createUserClient, isSchemaError } from '../lib/supabase';
 
 export const jobsRouter = new Hono<{ Variables: AuthVariables }>();
 
@@ -26,15 +26,16 @@ const updateJobSchema = createJobSchema
   });
 
 const paginationSchema = z.object({
-  page: z.coerce.number().int().min(1).default(1),
-  per_page: z.coerce.number().int().min(1).max(100).default(20),
-  status: z.enum(['pending', 'scheduled', 'in_progress', 'completed', 'cancelled']).optional(),
+  page:        z.coerce.number().int().min(1).default(1),
+  per_page:    z.coerce.number().int().min(1).max(100).default(20),
+  status:      z.enum(['pending', 'scheduled', 'in_progress', 'completed', 'cancelled']).optional(),
+  customer_id: z.string().uuid().optional(),
 });
 
 // ─── GET /api/v1/jobs ─────────────────────────
 
 jobsRouter.get('/', zValidator('query', paginationSchema), async (c) => {
-  const { page, per_page, status } = c.req.valid('query');
+  const { page, per_page, status, customer_id } = c.req.valid('query');
   const jwt = c.get('jwt');
   const supabase = createUserClient(jwt);
 
@@ -48,13 +49,13 @@ jobsRouter.get('/', zValidator('query', paginationSchema), async (c) => {
     .order('created_at', { ascending: false })
     .range(from, to);
 
-  if (status) {
-    query = query.eq('status', status);
-  }
+  if (status)      query = query.eq('status', status);
+  if (customer_id) query = query.eq('customer_id', customer_id);
 
   const { data, error, count } = await query;
 
   if (error) {
+    if (isSchemaError(error)) return c.json({ data: [], total: 0, page, per_page, total_pages: 0 });
     return c.json({ error: { message: error.message, code: 'DB_ERROR' } }, 500);
   }
 

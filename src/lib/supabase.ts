@@ -16,6 +16,16 @@ export const supabaseAdmin = createClient(supabaseUrl, supabaseServiceKey, {
   },
 });
 
+/** Returns true when Supabase reports a table/schema doesn't exist yet. */
+export function isSchemaError(error: { code?: string; message?: string } | null): boolean {
+  if (!error) return false;
+  return (
+    error.code === 'PGRST205' ||
+    error.code === 'PGRST200' ||
+    (typeof error.message === 'string' && error.message.includes('schema cache'))
+  );
+}
+
 // Creates a user-scoped client using the request's JWT
 // RLS will enforce company-level isolation
 export function createUserClient(jwt: string) {

@@ -9,6 +9,8 @@ import { healthRouter } from './routes/health';
 import { jobsRouter } from './routes/jobs';
 import { voiceRouter } from './routes/voice';
 import { quotesRouter } from './routes/quotes';
+import { customersRouter } from './routes/customers';
+import { authRouter } from './routes/auth';
 
 const app = new Hono();
 
@@ -32,6 +34,8 @@ app.route('/health', healthRouter);
 app.route('/api/v1/jobs', jobsRouter);
 app.route('/api/v1/voice', voiceRouter);
 app.route('/api/v1/quotes', quotesRouter);
+app.route('/api/v1/customers', customersRouter);
+app.route('/api/v1/auth', authRouter);
 
 // ─── 404 Handler ─────────────────────────────
 

@@ -138,30 +138,35 @@ Be direct and professional.`,
 
   // ── 4. Store voice log in DB ─────────────────
 
-  const { data: voiceLog, error: dbError } = await supabaseAdmin
-    .from('voice_logs')
-    .insert({
-      job_id: jobId ?? null,
-      user_id: userId,
-      audio_url: audioUrl,
-      transcript,
-      summary,
-    })
-    .select()
-    .single();
+  // Only persist to DB if a job_id is provided (schema requires NOT NULL job_id).
+  // Unlinked recordings are returned with transcript+summary but not stored.
+  let voiceLogId: string | null = null;
 
-  if (dbError) {
-    console.error('[Voice] DB insert error:', dbError);
-    return c.json(
-      { error: { message: 'Failed to save voice log', code: 'DB_ERROR' } },
-      500
-    );
+  if (jobId) {
+    const { data: voiceLog, error: dbError } = await supabaseAdmin
+      .from('voice_logs')
+      .insert({
+        job_id: jobId,
+        user_id: userId,
+        audio_url: audioUrl,
+        transcript,
+        summary,
+      })
+      .select()
+      .single();
+
+    if (dbError) {
+      console.error('[Voice] DB insert error:', dbError);
+      // Non-fatal — return transcript even if we can't save
+    } else {
+      voiceLogId = voiceLog.id;
+    }
   }
 
   return c.json(
     {
       data: {
-        voice_log_id: voiceLog.id,
+        voice_log_id: voiceLogId,
         transcript,
         summary,
         job_id: jobId,

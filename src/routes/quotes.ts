@@ -1,12 +1,15 @@
 import { Hono } from 'hono';
 import { zValidator } from '@hono/zod-validator';
 import { z } from 'zod';
+import OpenAI from 'openai';
 import { authMiddleware, AuthVariables } from '../middleware/auth';
-import { createUserClient } from '../lib/supabase';
+import { createUserClient, isSchemaError } from '../lib/supabase';
 
 export const quotesRouter = new Hono<{ Variables: AuthVariables }>();
 
 quotesRouter.use('*', authMiddleware);
+
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 // ─── Validation Schemas ───────────────────────
 
@@ -26,6 +29,81 @@ const createQuoteSchema = z.object({
 const updateQuoteSchema = z.object({
   line_items: z.array(lineItemSchema).optional(),
   status: z.enum(['draft', 'sent', 'accepted', 'rejected', 'expired']).optional(),
+});
+
+// ─── POST /api/v1/quotes/generate ──────────────
+// MUST be registered before /:id to avoid route conflict
+
+const generateSchema = z.object({
+  job_id:     z.string().uuid(),
+  transcript: z.string().min(1),
+});
+
+quotesRouter.post('/generate', zValidator('json', generateSchema), async (c) => {
+  const { job_id, transcript } = c.req.valid('json');
+  const jwt      = c.get('jwt');
+  const supabase = createUserClient(jwt);
+
+  // Ask GPT-4o to extract line items from the transcript
+  const completion = await openai.chat.completions.create({
+    model: 'gpt-4o',
+    max_tokens: 1024,
+    messages: [
+      {
+        role: 'system',
+        content:
+          'You are a field service quoting assistant. Given a technician\'s voice transcript, ' +
+          'extract up to 8 line items for a service quote. ' +
+          'Return ONLY a valid JSON array with no markdown or explanation. ' +
+          'Each element must have: description (string), quantity (integer >= 1), ' +
+          'unit_price_cents (integer >= 0), total_cents (integer >= 0). ' +
+          'total_cents must equal quantity * unit_price_cents.',
+      },
+      {
+        role: 'user',
+        content: `Transcript: ${transcript}`,
+      },
+    ],
+  });
+
+  let lineItems: Array<{
+    description:    string;
+    quantity:       number;
+    unit_price_cents: number;
+    total_cents:    number;
+  }>;
+
+  try {
+    const raw = completion.choices[0]?.message?.content ?? '[]';
+    lineItems = JSON.parse(raw);
+    if (!Array.isArray(lineItems)) throw new Error('Not an array');
+    // Clamp to 8 items and ensure total_cents is correct
+    lineItems = lineItems.slice(0, 8).map((item) => ({
+      ...item,
+      total_cents: item.quantity * item.unit_price_cents,
+    }));
+  } catch {
+    return c.json({ error: { message: 'AI returned invalid JSON', code: 'AI_PARSE_ERROR' } }, 500);
+  }
+
+  const total_cents = lineItems.reduce((sum, item) => sum + item.total_cents, 0);
+
+  const { data, error } = await supabase
+    .from('quotes')
+    .insert({
+      job_id,
+      line_items:  lineItems,
+      total_cents,
+      status:      'draft',
+    })
+    .select()
+    .single();
+
+  if (error) {
+    return c.json({ error: { message: error.message, code: 'DB_ERROR' } }, 500);
+  }
+
+  return c.json({ data }, 201);
 });
 
 // ─── GET /api/v1/quotes ───────────────────────
@@ -57,6 +135,7 @@ quotesRouter.get('/', async (c) => {
   const { data, error } = await query;
 
   if (error) {
+    if (isSchemaError(error)) return c.json({ data: [] });
     return c.json({ error: { message: error.message, code: 'DB_ERROR' } }, 500);
   }
 

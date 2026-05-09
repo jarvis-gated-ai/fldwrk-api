@@ -46,15 +46,53 @@ export const authMiddleware = createMiddleware<{ Variables: AuthVariables }>(asy
     .single();
 
   if (userError || !userRecord) {
-    return c.json(
-      {
-        error: {
-          message: 'User profile not found. Ensure the user is provisioned in the users table.',
-          code: 'USER_NOT_FOUND',
-        },
-      },
-      403
-    );
+    // Auto-provision: user is authenticated but has no profile yet.
+    // This happens when a user is created directly in Supabase Auth
+    // without going through the /register API endpoint.
+    const companyName = (user.user_metadata?.company_name as string | undefined)
+      || (user.email ? `${user.email.split('@')[0].replace(/[^a-zA-Z0-9 ]/g, ' ').trim()}'s Company` : 'My Company');
+
+    const { data: newCompany, error: companyErr } = await supabaseAdmin
+      .from('companies')
+      .insert({ name: companyName })
+      .select()
+      .single();
+
+    if (companyErr || !newCompany) {
+      return c.json(
+        { error: { message: 'Failed to provision company', code: 'PROVISION_ERROR' } },
+        500
+      );
+    }
+
+    const fullName = (user.user_metadata?.full_name as string | undefined)
+      || (user.email ? user.email.split('@')[0] : 'User');
+
+    const { error: insertErr } = await supabaseAdmin
+      .from('users')
+      .insert({
+        id:         user.id,
+        email:      user.email ?? '',
+        full_name:  fullName,
+        company_id: newCompany.id,
+        role:       'owner',
+      });
+
+    if (insertErr) {
+      // Clean up orphaned company
+      await supabaseAdmin.from('companies').delete().eq('id', newCompany.id);
+      return c.json(
+        { error: { message: 'Failed to provision user profile', code: 'PROVISION_ERROR' } },
+        500
+      );
+    }
+
+    c.set('userId',    user.id);
+    c.set('companyId', newCompany.id);
+    c.set('userRole',  'owner');
+    c.set('jwt',       jwt);
+    await next();
+    return;
   }
 
   // Attach context for downstream handlers
