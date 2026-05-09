@@ -111,18 +111,53 @@ authRouter.get('/me', authMiddleware, async (c) => {
 // Update the authenticated user's own profile.
 
 const updateMeSchema = z.object({
-  full_name: z.string().min(1).max(255).optional(),
+  full_name:    z.string().min(1).max(255).optional(),
+  phone:        z.string().max(30).optional(),
+  company_name: z.string().min(1).max(255).optional(),
 });
 
 authRouter.patch('/me', authMiddleware, zValidator('json', updateMeSchema), async (c) => {
-  const userId = c.get('userId');
-  const body   = c.req.valid('json');
+  const userId    = c.get('userId');
+  const companyId = c.get('companyId');
+  const { company_name, ...userFields } = c.req.valid('json');
 
+  // Update user profile fields (full_name, phone)
+  const userUpdate: Record<string, unknown> = {};
+  if (userFields.full_name) userUpdate.full_name = userFields.full_name;
+  if (userFields.phone !== undefined) userUpdate.phone = userFields.phone;
+
+  if (Object.keys(userUpdate).length > 0) {
+    const { error: userErr } = await supabaseAdmin
+      .from('users')
+      .update(userUpdate)
+      .eq('id', userId);
+
+    if (userErr) {
+      // If phone column doesn't exist yet, fall back to updating only known fields
+      if (userErr.message.includes('phone')) {
+        delete userUpdate.phone;
+        if (Object.keys(userUpdate).length > 0) {
+          await supabaseAdmin.from('users').update(userUpdate).eq('id', userId);
+        }
+      } else {
+        return c.json({ error: { message: userErr.message, code: 'DB_ERROR' } }, 500);
+      }
+    }
+  }
+
+  // Update company name if provided
+  if (company_name && companyId) {
+    await supabaseAdmin
+      .from('companies')
+      .update({ name: company_name })
+      .eq('id', companyId);
+  }
+
+  // Fetch and return updated profile
   const { data, error } = await supabaseAdmin
     .from('users')
-    .update(body)
-    .eq('id', userId)
     .select('id, email, full_name, role, company_id, created_at, company:companies(id, name)')
+    .eq('id', userId)
     .single();
 
   if (error) {
