@@ -1,6 +1,7 @@
 {
   "version": 2,
-  "buildCommand": "echo 'skip'",
+  "installCommand": "npm install --ignore-scripts",
+  "buildCommand": "echo 'skip — @vercel/node handles transpilation'",
   "outputDirectory": ".",
   "functions": {
     "api/index.ts": {
