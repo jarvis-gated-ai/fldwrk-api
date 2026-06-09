@@ -437,6 +437,276 @@ supportRouter.post('/webhook/interact', async (c) => {
   return c.json({ error: `Unknown action_id: ${action.action_id}` }, 400);
 });
 
+// ─── Helper: Post reply to an existing Slack thread ─────────
+
+async function postSlackThreadReply(threadTs: string, text: string): Promise<void> {
+  const botToken = process.env.SLACK_BOT_TOKEN;
+  if (!botToken || !threadTs) return;
+  try {
+    const res = await fetch('https://slack.com/api/chat.postMessage', {
+      method: 'POST',
+      headers: {
+        'Content-Type':  'application/json; charset=utf-8',
+        'Authorization': `Bearer ${botToken}`,
+      },
+      body: JSON.stringify({ channel: SLACK_OPS_CHANNEL_ID, thread_ts: threadTs, text }),
+    });
+    const json = (await res.json()) as { ok: boolean; error?: string };
+    if (!json.ok) console.error('[Support] patchSlackThread error:', json.error);
+  } catch (err) {
+    console.error('[Support] patchSlackThread threw:', err);
+  }
+}
+
+// ─── Admin guard helper ────────────────────────────────────────
+
+const isAdminRole = (role: string): boolean => ['owner', 'admin'].includes(role);
+
+// ─── Validation schemas (admin endpoints) ─────────────────────
+
+const casesQuerySchema = z.object({
+  page:       z.coerce.number().int().positive().default(1),
+  limit:      z.coerce.number().int().min(1).max(100).default(25),
+  status:     z.enum(['All', 'New', 'Auto_Resolved', 'Pending_Review', 'Escalated', 'Closed']).optional(),
+  category:   z.enum(['Bug', 'Billing', 'Account_Access', 'Feature_Request', 'General_Inquiry']).optional(),
+  search:     z.string().max(200).optional(),
+  sort_by:    z.enum(['created_at', 'updated_at', 'priority', 'status']).default('created_at'),
+  sort_order: z.enum(['asc', 'desc']).default('desc'),
+});
+
+const humanMessageSchema = z.object({
+  content:    z.string().min(1).max(10_000),
+  close_case: z.boolean().optional().default(false),
+});
+
+const caseMetadataSchema = z.object({
+  status:   z.enum(['New', 'Auto_Resolved', 'Pending_Review', 'Escalated', 'Closed']).optional(),
+  priority: z.enum(['Low', 'Medium', 'High', 'Critical']).optional(),
+  category: z.enum(['Bug', 'Billing', 'Account_Access', 'Feature_Request', 'General_Inquiry']).optional(),
+}).refine((d) => Object.values(d).some(Boolean), { message: 'At least one field required' });
+
+// ─── GET /api/v1/support/cases (admin) ────────────────────────
+
+supportRouter.get(
+  '/cases',
+  authMiddleware,
+  zValidator('query', casesQuerySchema),
+  async (c) => {
+    if (!isAdminRole(c.get('userRole'))) {
+      return c.json({ error: { message: 'Insufficient permissions', code: 'FORBIDDEN' } }, 403);
+    }
+
+    const { page, limit, status, category, search, sort_by, sort_order } = c.req.valid('query');
+    const offset = (page - 1) * limit;
+
+    let query = supabaseAdmin
+      .from('support_cases')
+      .select(
+        `id, subject, status, priority, category, sub_category,
+         ai_confidence_score, escalated_to_human,
+         created_at, updated_at, resolved_at,
+         users!inner(id, full_name, email),
+         companies!inner(id, name, plan_tier)`,
+        { count: 'exact' }
+      );
+
+    if (status && status !== 'All') query = query.eq('status', status);
+    if (category)                   query = query.eq('category', category);
+    if (search) {
+      query = query.or(`subject.ilike.%${search}%,description.ilike.%${search}%`);
+    }
+
+    query = query
+      .order(sort_by as 'created_at', { ascending: sort_order === 'asc' })
+      .range(offset, offset + limit - 1);
+
+    const { data, error, count } = await query;
+
+    if (error) {
+      return c.json({ error: { message: error.message, code: 'DB_ERROR' } }, 500);
+    }
+
+    return c.json({
+      data: {
+        cases: data ?? [],
+        pagination: {
+          page,
+          limit,
+          total: count ?? 0,
+          pages: Math.ceil((count ?? 0) / limit),
+        },
+      },
+    });
+  }
+);
+
+// ─── GET /api/v1/support/cases/:id (admin) ────────────────────
+
+supportRouter.get(
+  '/cases/:id',
+  authMiddleware,
+  async (c) => {
+    if (!isAdminRole(c.get('userRole'))) {
+      return c.json({ error: { message: 'Insufficient permissions', code: 'FORBIDDEN' } }, 403);
+    }
+
+    const caseId = c.req.param('id');
+
+    const [caseRes, interactionsRes] = await Promise.all([
+      supabaseAdmin
+        .from('support_cases')
+        .select(`
+          *,
+          users!inner(id, full_name, email, role, created_at),
+          companies!inner(id, name, plan_tier, created_at)
+        `)
+        .eq('id', caseId)
+        .single(),
+      supabaseAdmin
+        .from('support_interactions')
+        .select('*')
+        .eq('case_id', caseId)
+        .order('created_at', { ascending: true }),
+    ]);
+
+    if (caseRes.error || !caseRes.data) {
+      return c.json({ error: { message: 'Case not found', code: 'NOT_FOUND' } }, 404);
+    }
+
+    const companyId = (caseRes.data as Record<string, unknown>).company_id as string;
+    const { data: subscription } = await supabaseAdmin
+      .from('subscriptions')
+      .select('plan_tier, status, created_at, current_period_end')
+      .eq('company_id', companyId)
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    return c.json({
+      data: {
+        case:         caseRes.data,
+        interactions: interactionsRes.data ?? [],
+        subscription: subscription ?? null,
+      },
+    });
+  }
+);
+
+// ─── POST /api/v1/support/cases/:id/message (admin) ───────────
+
+supportRouter.post(
+  '/cases/:id/message',
+  authMiddleware,
+  zValidator('json', humanMessageSchema),
+  async (c) => {
+    if (!isAdminRole(c.get('userRole'))) {
+      return c.json({ error: { message: 'Insufficient permissions', code: 'FORBIDDEN' } }, 403);
+    }
+
+    const caseId = c.req.param('id');
+    const { content, close_case } = c.req.valid('json');
+    const actorId  = c.get('userId');
+
+    const { data: caseRecord, error: fetchErr } = await supabaseAdmin
+      .from('support_cases')
+      .select('id, status, slack_thread_ts, user_id, subject, escalated_to_human')
+      .eq('id', caseId)
+      .single();
+
+    if (fetchErr || !caseRecord) {
+      return c.json({ error: { message: 'Case not found', code: 'NOT_FOUND' } }, 404);
+    }
+
+    // Agent Takeover: freeze AI, mark human override, set status
+    const newStatus = close_case ? 'Closed' : 'Pending_Review';
+    const caseUpdate: Record<string, unknown> = {
+      escalated_to_human: true,   // AI triage is now frozen for this thread
+      status:             newStatus,
+      updated_at:         new Date().toISOString(),
+    };
+    if (close_case) caseUpdate.resolved_at = new Date().toISOString();
+
+    await supabaseAdmin.from('support_cases').update(caseUpdate).eq('id', caseId);
+
+    const { data: interaction } = await supabaseAdmin
+      .from('support_interactions')
+      .insert({
+        case_id:    caseId,
+        actor_type: 'human_note',
+        actor_id:   actorId,
+        content,
+        metadata:   { source: 'mission_control', status_set: newStatus },
+      })
+      .select()
+      .single();
+
+    // Bi-directional sync: push update to Slack thread
+    const slackTs = caseRecord.slack_thread_ts as string | null;
+    if (slackTs) {
+      const slackText = close_case
+        ? `✅ *Case closed by admin via Mission Control*\n\n${content}`
+        : `📝 *Human agent reply via Mission Control:*\n\n${content}`;
+      postSlackThreadReply(slackTs, slackText).catch(console.error);
+    }
+
+    // TODO: fire Resend email/push notification to end-user
+
+    return c.json({ data: { interaction, status: newStatus } }, 201);
+  }
+);
+
+// ─── PATCH /api/v1/support/cases/:id/metadata (admin) ─────────
+
+supportRouter.patch(
+  '/cases/:id/metadata',
+  authMiddleware,
+  zValidator('json', caseMetadataSchema),
+  async (c) => {
+    if (!isAdminRole(c.get('userRole'))) {
+      return c.json({ error: { message: 'Insufficient permissions', code: 'FORBIDDEN' } }, 403);
+    }
+
+    const caseId  = c.req.param('id');
+    const updates = c.req.valid('json');
+
+    const { data: existing, error: fetchErr } = await supabaseAdmin
+      .from('support_cases')
+      .select('id, slack_thread_ts, status')
+      .eq('id', caseId)
+      .single();
+
+    if (fetchErr || !existing) {
+      return c.json({ error: { message: 'Case not found', code: 'NOT_FOUND' } }, 404);
+    }
+
+    const patch: Record<string, unknown> = { ...updates, updated_at: new Date().toISOString() };
+    if (updates.status === 'Closed') patch.resolved_at = new Date().toISOString();
+
+    const { data: updatedCase, error } = await supabaseAdmin
+      .from('support_cases')
+      .update(patch)
+      .eq('id', caseId)
+      .select()
+      .single();
+
+    if (error) {
+      return c.json({ error: { message: error.message, code: 'DB_ERROR' } }, 500);
+    }
+
+    // Bi-directional sync: patch Slack thread when status changes
+    const slackTs = existing.slack_thread_ts as string | null;
+    if (updates.status && slackTs) {
+      const emoji = updates.status === 'Closed' ? '✅' : '🔄';
+      postSlackThreadReply(
+        slackTs,
+        `${emoji} Case status updated to *${updates.status}* via Mission Control`
+      ).catch(console.error);
+    }
+
+    return c.json({ data: { case: updatedCase } });
+  }
+);
+
 // ─── GET /api/v1/support/analytics/summary ────
 
 supportRouter.get(
