@@ -154,16 +154,13 @@ voiceRouter.post('/transcribe', async (c) => {
   const { error: uploadError } = await supabaseAdmin.storage
     .from(STORAGE_BUCKET)
     .upload(storagePath, audioBytes, {
-      contentType: audioFile.type,
+      contentType: audioFile.type || 'audio/m4a',
       upsert: false,
     });
 
   if (uploadError) {
-    console.error('[Voice] Storage upload error:', uploadError);
-    return c.json(
-      { error: { message: 'Failed to upload audio file', code: 'STORAGE_ERROR' } },
-      500
-    );
+    console.error('[voice/transcribe] Supabase storage upload failed:', JSON.stringify(uploadError));
+    return c.json({ error: { message: 'Storage upload failed: ' + (uploadError.message || 'unknown') } }, 500);
   }
 
   const { data: publicUrlData } = supabaseAdmin.storage
