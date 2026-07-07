@@ -151,10 +151,15 @@ voiceRouter.post('/transcribe', async (c) => {
   const fileExt      = audioFile.name.split('.').pop() ?? 'mp4';
   const storagePath  = `${userId}/${jobId ?? linkedToId ?? 'unlinked'}/${Date.now()}.${fileExt}`;
 
+  // Normalize iOS MIME quirks: audio/x-m4a, audio/m4a → canonical audio/mp4
+  const rawType    = audioFile.type || '';
+  const contentType = /m4a|aac|mp4/i.test(rawType) ? 'audio/mp4' : rawType || 'audio/mp4';
+  console.log(`[voice/transcribe] audioFile.type='${audioFile.type}' → contentType='${contentType}'`);
+
   const { error: uploadError } = await supabaseAdmin.storage
     .from(STORAGE_BUCKET)
     .upload(storagePath, audioBytes, {
-      contentType: audioFile.type || 'audio/m4a',
+      contentType,
       upsert: false,
     });
 
@@ -173,7 +178,7 @@ voiceRouter.post('/transcribe', async (c) => {
 
   let transcript = '';
   try {
-    const openaiFile = new File([audioBytes], `recording.${fileExt}`, { type: audioFile.type });
+    const openaiFile = new File([audioBytes], `recording.${fileExt}`, { type: contentType });
     const transcriptionResponse = await openai.audio.transcriptions.create({
       file: openaiFile,
       model: 'whisper-1',
