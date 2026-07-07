@@ -14,7 +14,9 @@ const STORAGE_BUCKET = process.env.SUPABASE_STORAGE_BUCKET ?? 'voice-recordings'
 // ─── Structured extraction types ─────────────────────────────────────────────
 
 interface VoiceLogAction {
-  type: 'create_customer' | 'create_job' | 'create_quote';
+  type:
+    | 'create_customer' | 'create_job'  | 'create_quote'
+    | 'update_job'     | 'update_customer' | 'update_quote';
   confidence: number;
   data: Record<string, unknown>;
 }
@@ -48,9 +50,7 @@ Extract structured actions from the transcript. Return ONLY valid JSON in this e
         "title": "job title",
         "description": "detailed description",
         "status": "pending",
-        "priority": "normal",
         "scheduled_date": "ISO date string or null",
-        "estimated_duration_hours": null,
         "customer_name": "name if mentioned, to link to created customer"
       }
     },
@@ -61,17 +61,51 @@ Extract structured actions from the transcript. Return ONLY valid JSON in this e
         "title": "quote title",
         "amount": null,
         "description": "what the quote is for",
-        "line_items": [
-          { "description": "item", "amount": 0, "quantity": 1 }
-        ],
         "customer_name": "name if mentioned",
         "job_title": "job title if mentioned, to link to created job"
+      }
+    },
+    {
+      "type": "update_job",
+      "confidence": 0.90,
+      "data": {
+        "job_title": "title of the existing job to find and update",
+        "new_status": "completed | in_progress | pending | scheduled | cancelled (omit if not changing)",
+        "title": "new title if renaming the job (omit if not renaming)",
+        "notes": "updated notes to add or replace (omit if not changing)",
+        "customer_name": "new customer name if reassigning (omit if not changing)"
+      }
+    },
+    {
+      "type": "update_customer",
+      "confidence": 0.88,
+      "data": {
+        "customer_name": "existing customer name to find",
+        "name": "new name if renaming (omit if not changing)",
+        "phone": "new phone number (omit if not changing)",
+        "email": "new email (omit if not changing)",
+        "address": "new address (omit if not changing)"
+      }
+    },
+    {
+      "type": "update_quote",
+      "confidence": 0.85,
+      "data": {
+        "job_title": "title of the job this quote belongs to (to find the quote)",
+        "new_status": "accepted | rejected | sent | draft | expired (omit if not changing)",
+        "amount": 12500.00
       }
     }
   ]
 }
 
-Only include actions that are clearly requested or strongly implied. If no actions are detected, return an empty actions array. Never invent data not present in the transcript. Confidence should reflect how certain you are the user wants this action taken. Only include action types that are relevant (omit shapes that don't apply).`;
+RULES:
+- Use create_ actions for NEW records, update_ actions for EXISTING records.
+- Keywords like 'mark', 'update', 'change', 'set', 'complete', 'finish', 'close', 'cancel' → update_ action.
+- Keywords like 'new', 'add', 'create', 'log' → create_ action.
+- Only include actions clearly requested or strongly implied. Confidence >= 0.7 required.
+- Never invent data not in the transcript.
+- Omit any action type that does not apply.`;
 
 async function extractActionsFromTranscript(transcript: string): Promise<ExtractedResult> {
   const response = await openai.chat.completions.create({
@@ -89,10 +123,15 @@ async function extractActionsFromTranscript(transcript: string): Promise<Extract
   const parsed = JSON.parse(content) as Partial<ExtractedResult>;
 
   const summary = parsed.summary ?? '';
+  const VALID_TYPES = new Set([
+    'create_customer', 'create_job', 'create_quote',
+    'update_job', 'update_customer', 'update_quote',
+  ]);
   const actions = (parsed.actions ?? []).filter(
     (a): a is VoiceLogAction =>
       typeof a === 'object' &&
       a !== null &&
+      VALID_TYPES.has(a.type) &&
       typeof a.confidence === 'number' &&
       a.confidence >= 0.7
   );

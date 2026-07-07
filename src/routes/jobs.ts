@@ -12,7 +12,7 @@ jobsRouter.use('*', authMiddleware);
 // ─── Validation Schemas ───────────────────────
 
 const createJobSchema = z.object({
-  customer_id: z.string().uuid(),
+  customer_id: z.string().uuid().optional().nullable(),
   title: z.string().min(1).max(255),
   status: z.enum(['pending', 'scheduled', 'in_progress', 'completed', 'cancelled']).optional(),
   scheduled_at: z.string().datetime().optional().nullable(),
