@@ -21,16 +21,42 @@ interface VoiceLogAction {
   data: Record<string, unknown>;
 }
 
-interface ExtractedResult {
-  summary: string;
-  actions: VoiceLogAction[];
+interface LineItem {
+  description: string;
+  quantity:    number;
+  unit_price:  number;  // dollars
+  line_total:  number;  // dollars
 }
+
+interface JobNotes {
+  summary:        string | null;
+  work_performed: string | null;
+  materials_used: string | null;
+  issues_found:   string | null;
+  follow_ups:     string | null;
+}
+
+interface ExtractedResult {
+  summary:   string;
+  actions:   VoiceLogAction[];
+  job_notes: JobNotes | null;
+}
+
+// Whisper trade vocabulary — seeds the transcription model with common terms
+const WHISPER_TRADE_PROMPT = 'quote, line item, invoice, labor, materials, HVAC, ductwork, drywall, plumbing, piping, permit, conduit, breaker, valve, compressor, thermostat, drain, slab, flashing, sheetrock';
 
 const EXTRACTION_SYSTEM_PROMPT = `You are an AI assistant for a field service management app used by tradespeople (plumbers, electricians, HVAC techs, etc.).
 
-Extract structured actions from the transcript. Return ONLY valid JSON in this exact shape:
+Extract structured actions AND job notes from the transcript. Return ONLY valid JSON in this exact shape:
 {
   "summary": "Brief 2-3 sentence summary of what was discussed",
+  "job_notes": {
+    "summary":        "1-2 sentence summary of work done on this visit, or null",
+    "work_performed": "What work was actually done, or null",
+    "materials_used": "Parts and materials mentioned, or null",
+    "issues_found":   "Problems discovered on-site, or null",
+    "follow_ups":     "What still needs to be done or checked, or null"
+  },
   "actions": [
     {
       "type": "create_customer",
@@ -59,10 +85,13 @@ Extract structured actions from the transcript. Return ONLY valid JSON in this e
       "confidence": 0.85,
       "data": {
         "title": "quote title",
-        "amount": null,
         "description": "what the quote is for",
         "customer_name": "name if mentioned",
-        "job_title": "job title if mentioned, to link to created job"
+        "job_title": "job title if mentioned, to link to created job",
+        "line_items": [
+          { "description": "Labor", "quantity": 1, "unit_price": 7000.00, "line_total": 7000.00 },
+          { "description": "Materials", "quantity": 1, "unit_price": 3500.00, "line_total": 3500.00 }
+        ]
       }
     },
     {
@@ -105,7 +134,10 @@ RULES:
 - Keywords like 'new', 'add', 'create', 'log' → create_ action.
 - Only include actions clearly requested or strongly implied. Confidence >= 0.7 required.
 - Never invent data not in the transcript.
-- Omit any action type that does not apply.`;
+- Omit any action type that does not apply.
+- For create_quote: ALWAYS return line_items as an array. No top-level "amount" field. Total = sum of line_items[*].line_total.
+- Normalize obvious mis-hears: "two lighten items" → "two line items".
+- job_notes: populate if ANY work-related content exists. Set fields to null only if genuinely absent.`;
 
 async function extractActionsFromTranscript(transcript: string): Promise<ExtractedResult> {
   const response = await openai.chat.completions.create({
@@ -114,7 +146,7 @@ async function extractActionsFromTranscript(transcript: string): Promise<Extract
       { role: 'system', content: EXTRACTION_SYSTEM_PROMPT },
       { role: 'user', content: `Voice note transcript:\n\n${transcript}` },
     ],
-    max_tokens: 600,
+    max_tokens: 1200,
     temperature: 0.2,
     response_format: { type: 'json_object' },
   });
@@ -136,7 +168,18 @@ async function extractActionsFromTranscript(transcript: string): Promise<Extract
       a.confidence >= 0.7
   );
 
-  return { summary, actions };
+  const rawNotes = parsed.job_notes;
+  const job_notes: JobNotes | null = rawNotes && typeof rawNotes === 'object'
+    ? {
+        summary:        rawNotes.summary        ?? null,
+        work_performed: rawNotes.work_performed ?? null,
+        materials_used: rawNotes.materials_used ?? null,
+        issues_found:   rawNotes.issues_found   ?? null,
+        follow_ups:     rawNotes.follow_ups     ?? null,
+      }
+    : null;
+
+  return { summary, actions, job_notes };
 }
 
 // ─── POST /api/v1/voice/transcribe ────────────────────────────────────────────
@@ -219,10 +262,11 @@ voiceRouter.post('/transcribe', async (c) => {
   try {
     const openaiFile = new File([audioBytes], `recording.${fileExt}`, { type: contentType });
     const transcriptionResponse = await openai.audio.transcriptions.create({
-      file: openaiFile,
-      model: 'whisper-1',
-      language: 'en',
+      file:            openaiFile,
+      model:           'whisper-1',
+      language:        'en',
       response_format: 'text',
+      prompt:          WHISPER_TRADE_PROMPT,
     });
     transcript = typeof transcriptionResponse === 'string'
       ? transcriptionResponse
@@ -237,12 +281,14 @@ voiceRouter.post('/transcribe', async (c) => {
 
   // ── 3. Structured extraction with GPT-4o ─────────────────────────────────
 
-  let summary = '';
+  let summary  = '';
   let actions: VoiceLogAction[] = [];
+  let jobNotes: JobNotes | null = null;
   try {
     const extracted = await extractActionsFromTranscript(transcript);
-    summary = extracted.summary;
-    actions = extracted.actions;
+    summary  = extracted.summary;
+    actions  = extracted.actions;
+    jobNotes = extracted.job_notes;
   } catch (err) {
     console.error('[Voice] GPT-4o extraction error:', err);
     // Non-fatal — still return transcript without actions
@@ -291,6 +337,33 @@ voiceRouter.post('/transcribe', async (c) => {
     console.error('[Voice] Unexpected DB error:', err);
   }
 
+  // ── 5. Persist job_notes (non-fatal) — requires migration 004 ─────────────
+  if (jobId && voiceLogId && jobNotes) {
+    const anyContent = Object.values(jobNotes).some((v) => v !== null);
+    if (anyContent) {
+      const { data: userData } = await supabaseAdmin
+        .from('users')
+        .select('company_id')
+        .eq('id', userId)
+        .single();
+      if (userData?.company_id) {
+        await supabaseAdmin.from('job_notes').insert({
+          job_id:         jobId,
+          voice_log_id:   voiceLogId,
+          user_id:        userId,
+          company_id:     userData.company_id,
+          summary:        jobNotes.summary,
+          work_performed: jobNotes.work_performed,
+          materials_used: jobNotes.materials_used,
+          issues_found:   jobNotes.issues_found,
+          follow_ups:     jobNotes.follow_ups,
+        }).then(({ error }) => {
+          if (error) console.warn('[Voice] job_notes insert failed (migration 004 needed?):', error.message);
+        });
+      }
+    }
+  }
+
   return c.json(
     {
       data: {
@@ -300,6 +373,7 @@ voiceRouter.post('/transcribe', async (c) => {
         job_id:    jobId,
         audio_url: audioUrl,
         actions,
+        job_notes: jobNotes,
       },
     },
     201
