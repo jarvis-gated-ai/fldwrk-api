@@ -136,6 +136,7 @@ RULES:
 - Never invent data not in the transcript.
 - Omit any action type that does not apply.
 - For create_quote: ALWAYS return line_items as an array. No top-level "amount" field. Total = sum of line_items[*].line_total.
+- CRITICAL — dollar amounts in quotes: when the user states a total price (e.g. "quote it at two thousand dollars", "charge $450", "the job is $2,000"), that dollar amount MUST go into unit_price and line_total of a line item — NEVER into the description string. Example: "quote it at two thousand dollars" → line_items: [{ "description": "Service", "quantity": 1, "unit_price": 2000.00, "line_total": 2000.00 }]. If the service type is mentioned (e.g. "AC repair for $450"), use that as the description instead of generic "Service".
 - Normalize obvious mis-hears: "two lighten items" → "two line items".
 - job_notes: populate if ANY work-related content exists. Set fields to null only if genuinely absent.`;
 
