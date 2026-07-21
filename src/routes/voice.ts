@@ -42,8 +42,21 @@ interface ExtractedResult {
   job_notes: JobNotes | null;
 }
 
-// Whisper trade vocabulary — seeds the transcription model with common terms
-const WHISPER_TRADE_PROMPT = 'quote, line item, invoice, labor, materials, HVAC, ductwork, drywall, plumbing, piping, permit, conduit, breaker, valve, compressor, thermostat, drain, slab, flashing, sheetrock';
+// Whisper trade vocabulary — seeds the transcription model with common trade terms.
+// P2-6c model eval (2026-07-21):
+//   gpt-4o-transcribe: ~$0.006/min, reported better accuracy on domain-specific terms
+//   whisper-1:         ~$0.006/min, identical pricing, well-tested production model
+//   VERDICT: Keep whisper-1 for now — same cost, proven stable. Re-evaluate when
+//     gpt-4o-transcribe exits beta and has documented WER benchmarks.
+const WHISPER_TRADE_PROMPT = [
+  'quote, line item, invoice, labor, materials, HVAC, ductwork, drywall, plumbing, piping,',
+  'permit, conduit, breaker, valve, compressor, thermostat, drain, slab, flashing, sheetrock,',
+  'Romex, PEX, CPVC, ABS, PVC, trap, P-trap, wax ring, shutoff valve, expansion tank,',
+  'heat pump, mini-split, BTU, tonnage, squareness, fascia, soffit, siding, joist, rafter,',
+  'furring strip, fire blocking, smoke detector, GFCI, arc fault, panel, subpanel, disconnect,',
+  'load center, busbar, neutral, ground fault, junction box, rough-in, trim-out, punch list,',
+  'scope of work, change order, T&M, time and materials',
+].join(' ');
 
 const EXTRACTION_SYSTEM_PROMPT = `You are an AI assistant for a field service management app used by tradespeople (plumbers, electricians, HVAC techs, etc.).
 
@@ -139,6 +152,29 @@ RULES:
 - CRITICAL — dollar amounts in quotes: when the user states a total price (e.g. "quote it at two thousand dollars", "charge $450", "the job is $2,000"), that dollar amount MUST go into unit_price and line_total of a line item — NEVER into the description string. Example: "quote it at two thousand dollars" → line_items: [{ "description": "Service", "quantity": 1, "unit_price": 2000.00, "line_total": 2000.00 }]. If the service type is mentioned (e.g. "AC repair for $450"), use that as the description instead of generic "Service".
 - Normalize obvious mis-hears: "two lighten items" → "two line items".
 - job_notes: populate if ANY work-related content exists. Set fields to null only if genuinely absent.`;
+
+// P2-6b: Normalize obvious speech-to-text mis-hears in trade/construction context.
+// Called after Whisper transcription and before GPT-4o action extraction.
+// Uses gpt-4o-mini at temperature=0 for deterministic, low-cost corrections.
+async function normalizeTranscript(raw: string): Promise<string> {
+  try {
+    const resp = await openai.chat.completions.create({
+      model: 'gpt-4o-mini',
+      temperature: 0,
+      messages: [
+        {
+          role: 'system',
+          content:
+            'You are a field service transcript normalizer. Fix obvious speech-to-text mis-hears in trade/construction context. Common corrections: \'romex\' (not \'rome x\'), \'PEX\' (not \'pex\'), \'GFCI\' (not \'G-F-C-I\'), \'HVAC\' (not \'H-VAC\'), etc. Return ONLY the corrected transcript, no explanations, no changes beyond obvious mis-hears.',
+        },
+        { role: 'user', content: raw },
+      ],
+    });
+    return resp.choices[0]?.message?.content ?? raw;
+  } catch {
+    return raw; // fallback to raw on error
+  }
+}
 
 async function extractActionsFromTranscript(transcript: string): Promise<ExtractedResult> {
   const response = await openai.chat.completions.create({
@@ -279,6 +315,9 @@ voiceRouter.post('/transcribe', async (c) => {
       500
     );
   }
+
+  // P2-6b: Normalize obvious mis-hears before GPT-4o extraction
+  transcript = await normalizeTranscript(transcript);
 
   // ── 3. Structured extraction with GPT-4o ─────────────────────────────────
 

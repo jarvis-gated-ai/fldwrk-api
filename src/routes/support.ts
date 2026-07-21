@@ -25,6 +25,16 @@ const createCaseSchema = z.object({
   description: z.string().min(1),
 });
 
+const submitCaseSchema = z.object({
+  category:       z.string().min(1).max(64),
+  case_number:    z.string().min(1).max(20),
+  form_data:      z.record(z.unknown()),
+  attachment_url: z.string().url().optional().nullable(),
+  // Derived fields forwarded to triage pipeline
+  subject:        z.string().max(255).optional(),
+  description:    z.string().optional(),
+});
+
 const analyticsQuerySchema = z.object({
   period: z.enum(['7d', '30d', '90d']).default('30d'),
 });
@@ -263,6 +273,90 @@ User context: Subscription tier: ${ctx.planTier}, Account since: ${ctx.createdAt
     await supabaseAdmin.from('support_cases').update(caseUpdate).eq('id', caseId);
   }
 }
+
+// ─── Helper: resolve user context for triage ───
+
+async function resolveUserContext(userId: string, companyId: string): Promise<UserContext> {
+  const [userRes, companyRes] = await Promise.allSettled([
+    supabaseAdmin.from('users').select('email, full_name, role, created_at').eq('id', userId).single(),
+    supabaseAdmin.from('companies').select('name, plan_tier').eq('id', companyId).single(),
+  ]);
+  const userProfile = userRes.status === 'fulfilled' ? userRes.value.data : null;
+  const company     = companyRes.status === 'fulfilled' ? companyRes.value.data : null;
+  return {
+    email:       String(userProfile?.email       ?? ''),
+    fullName:    String(userProfile?.full_name   ?? ''),
+    role:        String(userProfile?.role        ?? ''),
+    createdAt:   String(userProfile?.created_at  ?? ''),
+    companyName: String(company?.name            ?? ''),
+    planTier:    String(company?.plan_tier       ?? 'free'),
+  };
+}
+
+// ─── POST /api/v1/support/submit ────────────
+// Mobile client submits structured category forms here.
+// body: { category, case_number, form_data, attachment_url? }
+// Returns { ok: true, case_number }
+
+supportRouter.post(
+  '/submit',
+  authMiddleware,
+  zValidator('json', submitCaseSchema),
+  async (c) => {
+    const { category, case_number, form_data, attachment_url, subject, description } =
+      c.req.valid('json');
+    const userId    = c.get('userId');
+    const companyId = c.get('companyId');
+
+    const caseSubject     = subject ?? `${category} — ${case_number}`;
+    const caseDescription = description ?? JSON.stringify(form_data);
+
+    // Attempt full insert (includes new columns case_number, form_data, attachment_url)
+    const { data: newCase, error: caseErr } = await supabaseAdmin
+      .from('support_cases')
+      .insert({
+        user_id:        userId,
+        company_id:     companyId,
+        subject:        caseSubject,
+        description:    caseDescription,
+        category,
+        case_number,
+        form_data,
+        attachment_url: attachment_url ?? null,
+      })
+      .select('id')
+      .single();
+
+    let finalCaseId: string;
+
+    if (caseErr || !newCase) {
+      console.error('[Support/submit] Full insert failed, falling back:', caseErr?.message);
+      // Columns may not exist yet — fall back to minimal insert
+      const { data: fb, error: fbErr } = await supabaseAdmin
+        .from('support_cases')
+        .insert({ user_id: userId, company_id: companyId, subject: caseSubject, description: caseDescription })
+        .select('id')
+        .single();
+      if (fbErr || !fb) {
+        return c.json(
+          { error: { message: fbErr?.message ?? 'Failed to create case', code: 'DB_ERROR' } },
+          500
+        );
+      }
+      finalCaseId = fb.id as string;
+    } else {
+      finalCaseId = newCase.id as string;
+    }
+
+    // Fire-and-forget AI triage
+    const ctx = await resolveUserContext(userId, companyId);
+    triageCase(finalCaseId, caseSubject, caseDescription, ctx).catch(
+      (err) => console.error('[Support/submit] Background triage failed for case', finalCaseId, err)
+    );
+
+    return c.json({ ok: true, case_number });
+  }
+);
 
 // ─── POST /api/v1/support/create ─────────────
 
