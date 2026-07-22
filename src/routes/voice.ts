@@ -148,7 +148,9 @@ RULES:
 - Only include actions clearly requested or strongly implied. Confidence >= 0.7 required.
 - Never invent data not in the transcript.
 - Omit any action type that does not apply.
+- CRITICAL — EXPLICIT ENTITY CREATION: If the user explicitly says "create a job" or "add a job" or "log a job", you MUST include a create_job action. Never silently drop explicitly requested entities. If you cannot determine a job title, use the service description as the title.
 - For create_quote: ALWAYS return line_items as an array. No top-level "amount" field. Total = sum of line_items[*].line_total.
+- CRITICAL — UNIQUE LINE ITEMS: Each line item must describe a DISTINCT service or material. Do NOT repeat the same description multiple times. If a single price is mentioned with no breakdown, produce exactly ONE line item (e.g. { "description": "Swimming Pool Service", "quantity": 1, "unit_price": X, "line_total": X }). Maximum 10 unique line items per quote.
 - CRITICAL — dollar amounts in quotes: when the user states a total price (e.g. "quote it at two thousand dollars", "charge $450", "the job is $2,000"), that dollar amount MUST go into unit_price and line_total of a line item — NEVER into the description string. Example: "quote it at two thousand dollars" → line_items: [{ "description": "Service", "quantity": 1, "unit_price": 2000.00, "line_total": 2000.00 }]. If the service type is mentioned (e.g. "AC repair for $450"), use that as the description instead of generic "Service".
 - Normalize obvious mis-hears: "two lighten items" → "two line items".
 - job_notes: populate if ANY work-related content exists. Set fields to null only if genuinely absent.`;
@@ -215,6 +217,58 @@ async function extractActionsFromTranscript(transcript: string): Promise<Extract
         follow_ups:     rawNotes.follow_ups     ?? null,
       }
     : null;
+
+  // ─── Post-processing: deduplicate line items in create_quote actions ─────────────────
+  for (const action of actions) {
+    if (action.type === 'create_quote' && Array.isArray(action.data.line_items)) {
+      const rawItems = action.data.line_items as LineItem[];
+      const seen = new Set<string>();
+      const deduped: LineItem[] = [];
+      for (const item of rawItems) {
+        const key = `${item.description?.toLowerCase().trim()}|${item.unit_price}|${item.quantity}`;
+        if (!seen.has(key)) {
+          seen.add(key);
+          deduped.push(item);
+        } else {
+          console.warn(`[Voice] Deduplicated repeated line item: "${item.description}"`);
+        }
+      }
+      action.data.line_items = deduped;
+    }
+  }
+
+  // ─── Validation: log dropped or missing entities ──────────────────────────────────
+  const hasJob    = actions.some(a => a.type === 'create_job' || a.type === 'update_job');
+  const hasQuote  = actions.some(a => a.type === 'create_quote' || a.type === 'update_quote');
+
+  // Check: if a quote references a job_title not present in create_job actions, warn
+  for (const action of actions) {
+    if (action.type === 'create_quote') {
+      const refJobTitle = (action.data.job_title as string | undefined)?.toLowerCase().trim();
+      if (refJobTitle) {
+        const jobExists = actions.some(
+          a => a.type === 'create_job' &&
+            typeof a.data.title === 'string' &&
+            a.data.title.toLowerCase().trim() === refJobTitle
+        );
+        if (!jobExists) {
+          console.warn(
+            `[Voice] Quote "${action.data.title}" references job_title "${action.data.job_title}" ` +
+            `but no create_job action found for that title. User will be prompted to link manually.`
+          );
+        }
+      }
+    }
+  }
+
+  if (actions.length === 0) {
+    console.warn('[Voice] GPT returned 0 actions from transcript. Raw response was:', content);
+  } else {
+    console.log(`[Voice] Extracted ${actions.length} action(s):`, actions.map(a => `${a.type}(confidence=${a.confidence})`).join(', '));
+    if (!hasJob && hasQuote) {
+      console.warn('[Voice] WARNING: Quote action present but no job action found. Check if a job was explicitly requested and silently dropped.');
+    }
+  }
 
   return { summary, actions, job_notes };
 }
