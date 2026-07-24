@@ -11,6 +11,7 @@ import { customersRouter } from './routes/customers';
 import { authRouter } from './routes/auth';
 import { webhooksRouter } from './routes/webhooks';
 import { supportRouter } from './routes/support';
+import { accountRouter } from './routes/account';
 
 const app = new Hono();
 
@@ -38,6 +39,7 @@ app.route('/api/v1/customers', customersRouter);
 app.route('/api/v1/auth', authRouter);
 app.route('/api/v1/webhooks', webhooksRouter);
 app.route('/api/v1/support', supportRouter);
+app.route('/api/v1/account', accountRouter);
 
 // ─── 404 Handler ─────────────────────────────
 

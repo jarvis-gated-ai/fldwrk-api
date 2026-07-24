@@ -311,6 +311,14 @@ supportRouter.post(
     const caseSubject     = subject ?? `${category} — ${case_number}`;
     const caseDescription = description ?? JSON.stringify(form_data);
 
+    // Map mobile app category keys to DB ENUM values
+    const CATEGORY_MAP: Record<string, string> = {
+      bug:          'Bug',
+      email_change: 'Account_Access',
+      question:     'General_Inquiry',
+    };
+    const dbCategory = CATEGORY_MAP[category] ?? category;
+
     // Attempt full insert (includes new columns case_number, form_data, attachment_url)
     const { data: newCase, error: caseErr } = await supabaseAdmin
       .from('support_cases')
@@ -319,7 +327,7 @@ supportRouter.post(
         company_id:     companyId,
         subject:        caseSubject,
         description:    caseDescription,
-        category,
+        category:       dbCategory,
         case_number,
         form_data,
         attachment_url: attachment_url ?? null,
