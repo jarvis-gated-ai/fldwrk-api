@@ -356,11 +356,13 @@ supportRouter.post(
       finalCaseId = newCase.id as string;
     }
 
-    // Fire-and-forget AI triage
-    const ctx = await resolveUserContext(userId, companyId);
-    triageCase(finalCaseId, caseSubject, caseDescription, ctx).catch(
-      (err) => console.error('[Support/submit] Background triage failed for case', finalCaseId, err)
-    );
+    // Return immediately — resolveUserContext + triageCase both go fire-and-forget.
+    // PREVIOUSLY resolveUserContext was awaited here; on cold Vercel functions the
+    // supabaseAdmin connection can take 30-60 s, causing the mobile client's
+    // URLSession to time out at ~45 s before the response ever arrived.
+    resolveUserContext(userId, companyId)
+      .then((ctx) => triageCase(finalCaseId, caseSubject, caseDescription, ctx))
+      .catch((err) => console.error('[Support/submit] Background triage failed for case', finalCaseId, err));
 
     return c.json({ ok: true, case_number });
   }
