@@ -96,7 +96,7 @@ authRouter.get('/me', authMiddleware, async (c) => {
 
   const { data: user, error } = await supabaseAdmin
     .from('users')
-    .select('id, email, full_name, role, company_id, created_at, profile_image_url, company:companies(id, name)')
+    .select('id, email, full_name, role, company_id, created_at, profile_image_url, avatar_color, job_title, trade_types, primary_trade, company:companies(id, name)')
     .eq('id', userId)
     .single();
 
@@ -111,9 +111,13 @@ authRouter.get('/me', authMiddleware, async (c) => {
 // Update the authenticated user's own profile.
 
 const updateMeSchema = z.object({
-  full_name:    z.string().min(1).max(255).optional(),
-  phone:        z.string().max(30).optional(),
-  company_name: z.string().min(1).max(255).optional(),
+  full_name:     z.string().min(1).max(255).optional(),
+  phone:         z.string().max(30).optional(),
+  company_name:  z.string().min(1).max(255).optional(),
+  avatar_color:  z.string().max(20).optional(),
+  job_title:     z.string().max(100).optional(),
+  trade_types:   z.array(z.string().max(50)).optional(),
+  primary_trade: z.string().max(50).optional(),
 });
 
 authRouter.patch('/me', authMiddleware, zValidator('json', updateMeSchema), async (c) => {
@@ -126,6 +130,12 @@ authRouter.patch('/me', authMiddleware, zValidator('json', updateMeSchema), asyn
   if (userFields.full_name) userUpdate.full_name = userFields.full_name;
   if (userFields.phone !== undefined) userUpdate.phone = userFields.phone;
 
+  // Merge new optional fields
+  if (userFields.avatar_color  !== undefined) userUpdate.avatar_color  = userFields.avatar_color;
+  if (userFields.job_title     !== undefined) userUpdate.job_title     = userFields.job_title;
+  if (userFields.trade_types   !== undefined) userUpdate.trade_types   = userFields.trade_types;
+  if (userFields.primary_trade !== undefined) userUpdate.primary_trade = userFields.primary_trade;
+
   if (Object.keys(userUpdate).length > 0) {
     const { error: userErr } = await supabaseAdmin
       .from('users')
@@ -133,15 +143,7 @@ authRouter.patch('/me', authMiddleware, zValidator('json', updateMeSchema), asyn
       .eq('id', userId);
 
     if (userErr) {
-      // If phone column doesn't exist yet, fall back to updating only known fields
-      if (userErr.message.includes('phone')) {
-        delete userUpdate.phone;
-        if (Object.keys(userUpdate).length > 0) {
-          await supabaseAdmin.from('users').update(userUpdate).eq('id', userId);
-        }
-      } else {
-        return c.json({ error: { message: userErr.message, code: 'DB_ERROR' } }, 500);
-      }
+      return c.json({ error: { message: userErr.message, code: 'DB_ERROR' } }, 500);
     }
   }
 
@@ -156,7 +158,7 @@ authRouter.patch('/me', authMiddleware, zValidator('json', updateMeSchema), asyn
   // Fetch and return updated profile
   const { data, error } = await supabaseAdmin
     .from('users')
-    .select('id, email, full_name, role, company_id, created_at, profile_image_url, company:companies(id, name)')
+    .select('id, email, full_name, role, company_id, created_at, profile_image_url, avatar_color, job_title, trade_types, primary_trade, company:companies(id, name)')
     .eq('id', userId)
     .single();
 
