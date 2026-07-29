@@ -31,6 +31,12 @@ app.use(
 
 // ─── Routes ──────────────────────────────────
 
+// Version endpoint — returns Vercel-injected git SHA for deploy verification.
+// After every `git subtree push`, curl /_version and confirm SHA matches HEAD.
+app.get('/_version', (c) =>
+  c.json({ sha: process.env.VERCEL_GIT_COMMIT_SHA ?? 'local' })
+);
+
 app.route('/health', healthRouter);
 app.route('/api/v1/jobs', jobsRouter);
 app.route('/api/v1/voice', voiceRouter);
