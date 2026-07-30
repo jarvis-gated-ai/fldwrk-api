@@ -96,7 +96,7 @@ authRouter.get('/me', authMiddleware, async (c) => {
 
   const { data: user, error } = await supabaseAdmin
     .from('users')
-    .select('id, email, full_name, role, company_id, created_at, profile_image_url, avatar_color, job_title, trade_types, primary_trade, company:companies(id, name)')
+    .select('id, email, full_name, role, company_id, created_at, profile_image_url, phone, avatar_color, job_title, trade_types, primary_trade, company:companies(id, name)')
     .eq('id', userId)
     .single();
 
@@ -158,7 +158,7 @@ authRouter.patch('/me', authMiddleware, zValidator('json', updateMeSchema), asyn
   // Fetch and return updated profile
   const { data, error } = await supabaseAdmin
     .from('users')
-    .select('id, email, full_name, role, company_id, created_at, profile_image_url, avatar_color, job_title, trade_types, primary_trade, company:companies(id, name)')
+    .select('id, email, full_name, role, company_id, created_at, profile_image_url, phone, avatar_color, job_title, trade_types, primary_trade, company:companies(id, name)')
     .eq('id', userId)
     .single();
 
