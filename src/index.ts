@@ -2,7 +2,7 @@ import 'dotenv/config';
 import { serve } from '@hono/node-server';
 import app from './app';
 
-// ─── Local Dev Server ──────────────────────────────────────────────────────────
+// ─── Local Dev Server ─────────────────────────────────────── 2026-07-30 ───────
 
 const PORT = parseInt(process.env.PORT ?? '3001', 10);
 
